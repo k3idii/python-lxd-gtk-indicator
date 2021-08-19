@@ -9,5 +9,5 @@ When clicked - shows list of containers on LXD instance + red/green indicator.
 When clicked on container - popup dialog box w/ network configuration of this container.
 
 
-![Alt text](raw/master/img/screens/demo1.png "Demo screenshot")
+![Alt text](screens/demo1.png "Demo screenshot")
 
