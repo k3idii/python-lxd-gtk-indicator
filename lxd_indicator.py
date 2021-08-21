@@ -13,6 +13,7 @@ gi.require_version('Gtk', '3.0')
 gi.require_version('AppIndicator3', '0.1')
 from gi.repository import Gtk
 from gi.repository import Gdk
+from gi.repository import GLib
 from gi.repository import AppIndicator3
 from gi.repository import GObject
 
@@ -120,8 +121,8 @@ class TheGtkTrayIndicator():
 
     self.menu = Gtk.Menu()
     self.indicator.set_menu(self.menu)
-    self.indicator.set_icon(LXD_ICON)
-    self.indicator.set_attention_icon(LXD_ICON)
+    self.indicator.set_icon_full(LXD_ICON, APPNAME)
+    #self.indicator.set_attention_icon(LXD_ICON)
 
     Notify.init(APPNAME)
     self.notification = Notify.Notification.new('', '', None)
@@ -267,7 +268,8 @@ class TheGtkTrayIndicator():
     if self.update_scheduled:
       return
     self.update_scheduled = True
-    GObject.idle_add(self.recreate_menu, priority=GObject.PRIORITY_DEFAULT)
+    GLib.idle_add(self.recreate_menu, priority=GLib.PRIORITY_DEFAULT)
+    #GObject.idle_add(self.recreate_menu, priority=GObject.PRIORITY_DEFAULT)
 
   def click_shell(self, source):
     cont = source.custom_metadata
@@ -345,7 +347,9 @@ def main():
       cert = (args.cert, args.pkey),
     )
 
-  GObject.threads_init()
+  #GObject.threads_init()
+  # ^-- PyGIDeprecationWarning: Since version 3.11, calling threads_init is no longer needed. See: https://wiki.gnome.org/PyGObject/Threading
+
   obj = TheGtkTrayIndicator(lxd_config = lxd_config)
   start_new_thread(
     target = ws_event_loop_thread,
