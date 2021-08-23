@@ -17,5 +17,6 @@ Pops up GTK-ish indicator in the "system tray".
 TODO:
 * ~~support multiple/custom LXD host. Currently: localhost ;)~~
 * ~~support for cutom terminal~~
+* ~~support for projects~~
 * support for custom command
 * support for custom event handling 
