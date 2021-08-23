@@ -1,3 +1,4 @@
-pip install vext
-
-pip install vext.gi
+pylxd
+pyyaml
+vext
+vext.gi
