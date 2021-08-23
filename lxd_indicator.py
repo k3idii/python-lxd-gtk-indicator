@@ -109,6 +109,7 @@ class TheGtkTrayIndicator():
     if lxd_config is None:
       lxd_config = {}
     self.lxd_client = pylxd.Client(**lxd_config)
+    self._current_project = None 
 
 
     self.indicator = AppIndicator3.Indicator.new(
@@ -122,7 +123,7 @@ class TheGtkTrayIndicator():
     self.menu = Gtk.Menu()
     self.indicator.set_menu(self.menu)
     self.indicator.set_icon_full(LXD_ICON, APPNAME)
-    #self.indicator.set_attention_icon(LXD_ICON)
+    #self.indicator.set_attention_icon(LXD_ICON) 
 
     Notify.init(APPNAME)
     self.notification = Notify.Notification.new('', '', None)
@@ -136,7 +137,10 @@ class TheGtkTrayIndicator():
     self.ico_running[STR_RUNNING] = Gtk.Image.new_from_file(ICO_UP)
     self.ico_running[STR_STOPPED] = Gtk.Image.new_from_file(ICO_DOWN)
 
+###  
 ### LXD ROUTINES
+###
+
   def lxd_get_all(self):
     """
       Fetch all containers and coresponding status
@@ -161,7 +165,26 @@ class TheGtkTrayIndicator():
       Get new websocket connected to event source
     """
     return self.lxd_client.events(websocket_client = MyWebSocket)
+
+  def lxd_get_all_projects_names(self):
+    return list(
+      x.name for x in self.lxd_client.projects.all()
+    )
+  
+  def lxd_dirty_project_switch(self, name):
+    tmp = self.lxd_client.projects.get(name) # this should fail if project noexists
+    # that hurts .....
+    self.lxd_client.api._project = name
+  
+  def lxd_dirty_get_api_project_str(self):
+    proj = self.lxd_client.api._project
+    if proj is None:
+      return 'default'
+    return proj
+
+### 
 ### </LXD>
+###
 
   def show_notification(self, message, icon=None):
     """
@@ -203,15 +226,14 @@ class TheGtkTrayIndicator():
       sub_sub_item.custom_metadata = container
       submenu.append(sub_sub_item)
 
-      menu_sep = Gtk.SeparatorMenuItem()
-      submenu.append(menu_sep)
+      submenu.append(Gtk.SeparatorMenuItem())
 
       sub_sub_item = Gtk.MenuItem(label='STOP instance ... ')
       sub_sub_item.connect('activate', self.click_stop_instance)
       sub_sub_item.custom_metadata = container
       submenu.append(sub_sub_item)
-      menu_sep = Gtk.SeparatorMenuItem()
-      submenu.append(menu_sep)
+
+      submenu.append(Gtk.SeparatorMenuItem())
       for net_name, net_value in container['network'].items():
         #print(net_value)
         for address in net_value['addresses']:
@@ -240,7 +262,22 @@ class TheGtkTrayIndicator():
     menuitem = Gtk.MenuItem(label='Force reload status ... ')
     menuitem.connect('activate', self.schedule_menu_update)
     self.menu.append(menuitem)
+    
+    self.menu.append(Gtk.SeparatorMenuItem())
+    
+    submenu = Gtk.Menu()
+    for proj in self.lxd_get_all_projects_names():
+      menuitem = Gtk.MenuItem(label=f"Switch to : {proj}")
+      menuitem.connect("activate", self.click_switch_project)
+      menuitem.custom_metadata = proj
+      submenu.append(menuitem)
+    menuitem = Gtk.MenuItem(label=f"Project:\t {self.lxd_dirty_get_api_project_str()}")
+    menuitem.set_submenu(submenu)
+    self.menu.append(menuitem)
 
+
+    self.menu.append(Gtk.SeparatorMenuItem())
+    
     for container in self.lxd_get_all():
       ico = self.ico_running[container['status']]
       menuitem = Gtk.ImageMenuItem.new_with_label(
@@ -296,6 +333,13 @@ class TheGtkTrayIndicator():
     addr = data['address']
     self.clipboard.set_text(addr, -1)
     self.show_notification(f"in clipboard : \n{addr}")
+
+  def click_switch_project(self, source):
+    proj = source.custom_metadata
+    self.show_notification(f"Switch to project : {proj}")
+    self.lxd_dirty_project_switch(proj)
+    self.schedule_menu_update()
+
 
   def click_stop(self, _):
     Gtk.main_quit()
