@@ -6,6 +6,7 @@ import time
 import threading
 import json
 import yaml
+from urllib import parse as url_parse
 
 import pylxd
 import gi
@@ -57,6 +58,7 @@ class MyWebSocket(pylxd.client._WebsocketClient):
 
   def received_message(self, message):
     msg = json.loads(str(message)) # do it anyway
+    # print(msg)
     if len(self.interesting_events) > 0:
       if msg['type'] not in self.interesting_events:
         return
@@ -64,7 +66,7 @@ class MyWebSocket(pylxd.client._WebsocketClient):
     if self.callback is not None:
       self.callback(msg)
     else:
-      print("(no callback defined) ECENT : ", msg)
+      print("(no callback defined) EVENT : ", msg)
 
 
 def _is_running(container):
@@ -87,14 +89,6 @@ def _gtk_dialog_yes_no(title, message):
   dialog.destroy()
   return result
 
-def start_new_thread(target, obj, **kw):
-  """
-    All-in-one start new thread, w/ one argument (reference to object)
-  """
-  thr = threading.Thread(target=target, args=[obj], kwargs=kw)
-  thr.setDaemon(True)
-  thr.start()
-
 
 
 class TheGtkTrayIndicator():
@@ -103,18 +97,30 @@ class TheGtkTrayIndicator():
     lxd_client
     gtk stuff: indicator, notification, clipboard, menu, ...
   """
+  lxd_client = None
+  lxd_config = None
+  menu = None
+  indicator = None
+  is_update_scheduled = False
+
+  _event_thread = None
+  _event_thread_condition = True
+  _event_socket = None
+
+
 
   def __init__(self, lxd_config=None):
 
+    self.lxd_config = lxd_config
     if lxd_config is None:
-      lxd_config = {}
-    self.lxd_client = pylxd.Client(**lxd_config)
-    self._current_project = None 
-
+      self.lxd_config = {}
+    
+    self.lxd_create_client()
 
     self.indicator = AppIndicator3.Indicator.new(
         APPNAME, LXD_ICON,
-        AppIndicator3.IndicatorCategory.OTHER)
+        AppIndicator3.IndicatorCategory.OTHER
+    )
 
     self.indicator.set_status(
       AppIndicator3.IndicatorStatus.ACTIVE
@@ -130,21 +136,69 @@ class TheGtkTrayIndicator():
 
     self.clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
 
-    self.update_scheduled = False
+    self.is_update_scheduled = False
     self.schedule_menu_update()
 
     self.ico_running = {}
     self.ico_running[STR_RUNNING] = Gtk.Image.new_from_file(ICO_UP)
     self.ico_running[STR_STOPPED] = Gtk.Image.new_from_file(ICO_DOWN)
 
+    thr = threading.Thread(target=self._websocket_event_loop)
+    thr.setDaemon(True)
+    self._event_thread = thr
+    thr.start()
+
+###
+### Event-socket thread 
+###
+
+  def _websocket_event_loop(self):
+    def _internal_callback(msg):
+      self.new_event(msg)
+
+    while self._event_thread_condition:
+      print("Hello from WebSocket events thread !")
+      self._event_socket = self.lxd_get_events_ws()
+
+      #  
+      # this hack here is due to lack of Project=xxx param support in pylxd 
+      #
+      if self._lxd_current_project:
+        resource = self._event_socket.resource
+        #print("ORG resource :", resource)
+        parsed = url_parse.urlparse(resource)
+        org_path = parsed.path
+        query = url_parse.parse_qs(parsed.query)
+        query.update(dict(project = self._lxd_current_project))
+        args = url_parse.urlencode(query)
+        resource = f"{org_path}?{args}"
+        #print("Hacked resource : ", resource)
+        self._event_socket.resource = resource
+        # 
+        # end of hack !
+        #
+
+      self._event_socket.callback = _internal_callback
+      self._event_socket.connect()
+      self._event_socket.run()
+      print("Well... the socket was somehow closed !")
+      time.sleep(1)
+      # wait 1 second, and try to reconnect to socket (in case client was restarted/etc)
+      
+
 ###  
 ### LXD ROUTINES
 ###
 
-  def lxd_get_all(self):
-    """
-      Fetch all containers and coresponding status
-    """
+  def lxd_create_client(self, project_name=None):
+    self._lxd_current_project = project_name
+    self.lxd_client = pylxd.Client(project=project_name, **self.lxd_config)
+    if self._event_socket is not None:
+      self._event_socket.close()
+
+
+  def lxd_get_all_containers(self):
+    """  Fetch all containers and coresponding status """
     return list(
       dict(
         name = x.name,
@@ -155,15 +209,11 @@ class TheGtkTrayIndicator():
     )
 
   def lxd_get_container(self, name):
-    """
-      Get container by name
-    """
+    """ Get container by name """
     return self.lxd_client.containers.get(name)
 
   def lxd_get_events_ws(self):
-    """
-      Get new websocket connected to event source
-    """
+    """ Get new websocket connected to event source """
     return self.lxd_client.events(websocket_client = MyWebSocket)
 
   def lxd_get_all_projects_names(self):
@@ -171,17 +221,17 @@ class TheGtkTrayIndicator():
       x.name for x in self.lxd_client.projects.all()
     )
   
-  def lxd_dirty_project_switch(self, name):
-    tmp = self.lxd_client.projects.get(name) # this should fail if project noexists
-    # that hurts .....
-    self.lxd_client.api._project = name
+  def lxd_full_switch_project(self, name):
+    tmp = self.lxd_client.projects.get(name) 
+    # ^--- this should fail if project noexists
+    # previous dirty hack : self.lxd_client.api._project = name
+    self.lxd_create_client(project_name=name)
   
-  def lxd_dirty_get_api_project_str(self):
-    proj = self.lxd_client.api._project
-    if proj is None:
-      return 'default'
-    return proj
-
+  def lxd_get_current_project_name(self):
+    return self._lxd_current_project if self._lxd_current_project else "default" 
+    # ^-- handle "none"
+    #proj = self.lxd_client.api._project
+    
 ### 
 ### </LXD>
 ###
@@ -207,7 +257,7 @@ class TheGtkTrayIndicator():
       self.schedule_menu_update()
       # ^-- schedule update on ANY lifecycle event
 
-      name = event['metadata']['source'].split("/")[-1]
+      name = event['metadata']['source'].split("/")[-1].split("?")[0] # huh dirty:)
       if event['metadata']['action'] in LXD_EVENTS_UP:
         self.show_notification(f" UP : {name}", icon = ICO_UP)
       elif event['metadata']['action'] in LXD_EVENTS_DOWN:
@@ -260,7 +310,7 @@ class TheGtkTrayIndicator():
 
     # Reload button
     menuitem = Gtk.MenuItem(label='Force reload status ... ')
-    menuitem.connect('activate', self.schedule_menu_update)
+    menuitem.connect('activate', self.click_update)
     self.menu.append(menuitem)
     
     self.menu.append(Gtk.SeparatorMenuItem())
@@ -271,14 +321,14 @@ class TheGtkTrayIndicator():
       menuitem.connect("activate", self.click_switch_project)
       menuitem.custom_metadata = proj
       submenu.append(menuitem)
-    menuitem = Gtk.MenuItem(label=f"Project:\t {self.lxd_dirty_get_api_project_str()}")
+    menuitem = Gtk.MenuItem(label=f"Project:\t {self.lxd_get_current_project_name()}")
     menuitem.set_submenu(submenu)
     self.menu.append(menuitem)
 
 
     self.menu.append(Gtk.SeparatorMenuItem())
     
-    for container in self.lxd_get_all():
+    for container in self.lxd_get_all_containers():
       ico = self.ico_running[container['status']]
       menuitem = Gtk.ImageMenuItem.new_with_label(
         label = f"{container['name']} ({container['status']})"
@@ -299,14 +349,21 @@ class TheGtkTrayIndicator():
 
     self.menu.show_all()
 
-    self.update_scheduled = False
+    self.is_update_scheduled = False
 
-  def schedule_menu_update(self, *_):
-    if self.update_scheduled:
+  def schedule_menu_update(self):
+    if self.is_update_scheduled:
       return
-    self.update_scheduled = True
+    self.is_update_scheduled = True
     GLib.idle_add(self.recreate_menu, priority=GLib.PRIORITY_DEFAULT)
     #GObject.idle_add(self.recreate_menu, priority=GObject.PRIORITY_DEFAULT)
+
+###
+### CLICK HANDLERS
+###
+
+  def click_update(self, _):
+    self.schedule_menu_update()
 
   def click_shell(self, source):
     cont = source.custom_metadata
@@ -337,30 +394,21 @@ class TheGtkTrayIndicator():
   def click_switch_project(self, source):
     proj = source.custom_metadata
     self.show_notification(f"Switch to project : {proj}")
-    self.lxd_dirty_project_switch(proj)
+    self.lxd_full_switch_project(proj)
     self.schedule_menu_update()
 
 
   def click_stop(self, _):
-    Gtk.main_quit()
+    #self.lxd_client.close()
+    self.event_socket.close()
+    #Gtk.main_quit()
 
 
-def periodic_update_thread(obj):
+def _unused_yet_periodic_update_thread(obj):
   while True:
     time.sleep(5)
     print("Update Thread BEEP")
     obj.schedule_menu_update()
-
-
-def ws_event_loop_thread(obj):
-  def _internal_callback(msg):
-    obj.new_event(msg)
-
-  print("Hello from WebSocket events thread !")
-  wsock = obj.lxd_get_events_ws()
-  wsock.callback = _internal_callback
-  wsock.connect()
-  wsock.run()
 
 
 
@@ -395,10 +443,6 @@ def main():
   # ^-- PyGIDeprecationWarning: Since version 3.11, calling threads_init is no longer needed. See: https://wiki.gnome.org/PyGObject/Threading
 
   obj = TheGtkTrayIndicator(lxd_config = lxd_config)
-  start_new_thread(
-    target = ws_event_loop_thread,
-    obj = obj,
-  )
   Gtk.main()
 
 
